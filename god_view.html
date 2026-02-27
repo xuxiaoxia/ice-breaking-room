@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>破冰馆 - 上帝视角全局掌控版</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #ffffff; font-family: 'Microsoft YaHei', sans-serif; touch-action: none; user-select: none; }
+        
+        /* 顶部说明面板 */
+        #instructions {
+            position: absolute; top: 20px; left: 20px;
+            background: rgba(255, 255, 255, 0.9); padding: 15px; border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1); z-index: 1000; pointer-events: none;
+            border: 1px solid #ccc;
+        }
+
+        /* 电梯控制面板样式 (保持不变) */
+        #elevator-panel {
+            position: absolute; top: 20px; right: 20px;
+            background: rgba(0, 0, 0, 0.8); padding: 15px; border-radius: 10px;
+            display: none; flex-direction: column; gap: 10px; z-index: 1000;
+            border: 2px solid #555; pointer-events: auto;
+        }
+        .ele-btn {
+            width: 45px; height: 45px; border-radius: 5px; border: 1px solid #777;
+            background: #222; color: #fff; font-size: 18px; font-weight: bold;
+            cursor: pointer; display: flex; justify-content: center; align-items: center;
+            transition: all 0.2s; user-select: none;
+        }
+        .ele-btn:hover { background: #555; }
+        .ele-btn.active { background: #0078D7; border-color: #00B4FF; box-shadow: 0 0 10px #00B4FF; }
+        .ele-hint { color: #aaa; font-size: 12px; text-align: center; margin-top: 5px; line-height: 1.4; }
+    </style>
+</head>
+<body>
+    <div id="instructions">
+        <strong>[ 破冰馆 - 上帝视角 ]</strong><br/><br/>
+        <span>👉 <b>左键拖拽</b>：旋转视角</span><br/>
+        <span>👉 <b>右键拖拽</b>：平移视角</span><br/>
+        <span>👉 <b>滚轮缩放</b>：拉近/拉远</span><br/>
+        <span>👉 <b>单击鼠标左键</b>：开门 / 控制遮光板</span>
+    </div>
+
+    <div id="elevator-panel">
+        <div class="ele-btn" id="btn-4" onclick="callElevator(4)">4F</div>
+        <div class="ele-btn" id="btn-3" onclick="callElevator(3)">3F</div>
+        <div class="ele-btn" id="btn-2" onclick="callElevator(2)">2F</div>
+        <div class="ele-btn active" id="btn-1" onclick="callElevator(1)">1F</div>
+        <div class="ele-hint">按键盘 1~4<br/>(手机可点击)</div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+
+    <script>
+        // --- 电梯核心全局变量 ---
+        let currentElevatorFloor = 1; 
+        let targetElevatorFloor = 1;
+        let isElevatorMoving = false;
+        let elevatorObj = null;
+        let isAllCurrentDoorsClosed = true;
+        const FLOOR_HEIGHT = 3.0; // 每层高度 3 米
+        
+        // 全局电梯调度函数
+        window.callElevator = function(floor) {
+            if (!isElevatorMoving && floor !== currentElevatorFloor) {
+                targetElevatorFloor = floor;
+                isElevatorMoving = true;
+                // 立即更新 UI 按钮状态
+                document.querySelectorAll('.ele-btn').forEach(btn => btn.classList.remove('active'));
+                document.getElementById('btn-' + floor).classList.add('active');
+            }
+        };
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xD8EDF2);
+
+        // 【修改】：将摄像机放置在空中，俯瞰建筑
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(15, 15, 20); 
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        // 保留你之前不想要的像素优化（如果还是卡可以自行加回来）
+        document.body.appendChild(renderer.domElement);
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 1.2); 
+        scene.add(ambientLight);
+        const sunLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        sunLight.position.set(10, 20, 10);
+        scene.add(sunLight);
+        // 【修改】：上帝视角下，点光源不再跟着相机走，而是固定在建筑中心上方
+        const pointLight = new THREE.PointLight(0xffffff, 0.6, 30);
+        pointLight.position.set(0, 15, 0);
+        scene.add(pointLight);
+
+        // 【修改】：加入 OrbitControls
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 6, 0); // 视角中心对准破冰馆的中心高度
+        controls.enableDamping = true; // 开启丝滑惯性
+        controls.dampingFactor = 0.05;
+        controls.maxDistance = 50; // 限制最远拉伸距离
+
+        const matteGrayMaterial = new THREE.MeshLambertMaterial({
+            color: 0x555555, side: THREE.DoubleSide
+        });
+
+        const loader = new THREE.GLTFLoader();
+        let roomModel;
+        const interactiveDoors = [];
+        const interactiveShutters = []; 
+
+        loader.load('room102.glb', (gltf) => {
+            roomModel = gltf.scene;
+            scene.add(roomModel);
+            roomModel.traverse((child) => {
+                if (child.isMesh) {
+                    if (child.name.includes('Elevator')) {
+                        elevatorObj = child;
+                    }
+                    if (child.name.includes('Shutter')) {
+                        child.material = new THREE.MeshStandardMaterial({ color: 0x444444, metalness: 0.2, roughness: 0.8 });
+                    } else if (child.name.includes('Text')) {
+                        child.material = new THREE.MeshStandardMaterial({ color: 0x2b5797, metalness: 0.8, roughness: 0.6 });
+                    } else if (child.name.includes('Window_Glass')) {
+                        child.material = new THREE.MeshBasicMaterial({ color: 0x55aaff, transparent: true, opacity: 0.4, side: THREE.DoubleSide });
+                    } else if (child.name.includes('Room') || child.name.includes('Door_')){
+                        child.material = matteGrayMaterial; 
+                    }
+                }
+                if (child.name.includes('Door')) {
+                    child.userData.isOpen = false; 
+                    child.userData.baseRotationY = child.rotation.y;
+                    child.userData.targetRotationY = child.rotation.y; 
+                    interactiveDoors.push(child);
+                }
+                if (child.name.includes('Shutter')) {
+                    child.userData.isSlid = false;
+                    child.userData.basePosZ = child.position.z;
+                    child.userData.targetPosZ = child.position.z;
+                    interactiveShutters.push(child);
+                }
+            });
+        });
+
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        // 【修改】：使用鼠标真实点击位置发射射线，不再是从屏幕正中心发射
+        function onPointerDown(event) {
+            // 将鼠标点击坐标转换为标准的设备坐标 (-1 to +1)
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(roomModel ? roomModel.children : [], true);
+            
+            if (intersects.length > 0) {
+                let obj = intersects[0].object;
+
+                // 1. 处理遮光板 (Shutter)
+                let shutterObj = obj;
+                while(shutterObj.parent && !shutterObj.name.includes('Shutter')) {
+                    if(shutterObj.parent.type === 'Scene') break; shutterObj = shutterObj.parent;
+                }
+                if (shutterObj.name.includes('Shutter')) {
+                    if (!shutterObj.userData.isSlid) {
+                        shutterObj.userData.targetPosZ = shutterObj.userData.basePosZ - 0.8;
+                        shutterObj.userData.isSlid = true;
+                    } else {
+                        shutterObj.userData.targetPosZ = shutterObj.userData.basePosZ;
+                        shutterObj.userData.isSlid = false;
+                    }
+                    return; 
+                }
+
+                // 2. 处理门 (Door)
+                let doorObj = obj;
+                while(doorObj.parent && !doorObj.name.includes('Door')) {
+                    if(doorObj.parent.type === 'Scene') break; doorObj = doorObj.parent;
+                }
+                
+                if (doorObj.name.includes('Door')) {
+                    let isOpening = !doorObj.userData.isOpen;
+                    let match = doorObj.name.match(/_([1-4])/);
+                    let doorFloor = match ? parseInt(match[1]) : 1;
+
+                    // 【卷宗核心机制】：电梯移动中禁止开门；二层及以上电梯不在当前层时禁止开门
+                    if (isOpening) {
+                        if (isElevatorMoving) return; 
+                        if (doorFloor >= 2 && currentElevatorFloor !== doorFloor) {
+                            console.warn(`安全锁强制拦截：电梯当前在 ${currentElevatorFloor} 楼，上帝也无法打开 ${doorFloor} 楼的门！`);
+                            return; 
+                        }
+                    }
+
+                    let swingDir = doorObj.name.includes('Rev') ? 1 : -1;
+                    doorObj.userData.targetRotationY = isOpening ? 
+                        doorObj.userData.baseRotationY + swingDir * (Math.PI / 4) : doorObj.userData.baseRotationY; 
+                    doorObj.userData.isOpen = isOpening;
+                }
+            }
+        }
+
+        // 兼容 PC 鼠标和移动端触摸点击
+        window.addEventListener('pointerdown', (e) => {
+            // 如果点击的是 UI 面板，不要触发射线
+            if (e.target.classList.contains('ele-btn')) return;
+            onPointerDown(e);
+        });
+
+        // 键盘呼叫电梯快捷键
+        document.addEventListener('keydown', (e) => {
+            if (isAllCurrentDoorsClosed && !isElevatorMoving) {
+                if (e.code === 'Digit1' || e.code === 'Numpad1') window.callElevator(1);
+                if (e.code === 'Digit2' || e.code === 'Numpad2') window.callElevator(2);
+                if (e.code === 'Digit3' || e.code === 'Numpad3') window.callElevator(3);
+                if (e.code === 'Digit4' || e.code === 'Numpad4') window.callElevator(4);
+            }
+        });
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            // 更新上帝视角控制器
+            controls.update();
+
+            // 1. 检查当前楼层的【外室门】是否已全部关好
+            isAllCurrentDoorsClosed = true;
+            interactiveDoors.forEach(door => {
+                if (door.name.includes('Outer')) {
+                    let match = door.name.match(/_([1-4])/);
+                    let doorFloor = match ? parseInt(match[1]) : 1;
+                    if (doorFloor === currentElevatorFloor && door.userData.isOpen) {
+                        isAllCurrentDoorsClosed = false;
+                    }
+                }
+            });
+
+            // 2. UI 控制面板显隐逻辑 (上帝视角下无视玩家位置，只受门状态限制)
+            const panel = document.getElementById('elevator-panel');
+            if (isAllCurrentDoorsClosed && !isElevatorMoving) {
+                panel.style.display = 'flex';
+            } else {
+                panel.style.display = 'none';
+            }
+
+            // 3. 电梯平台升降物理引擎
+            if (isElevatorMoving && elevatorObj) {
+                let targetY = (targetElevatorFloor - 1) * FLOOR_HEIGHT;
+                let currentY = elevatorObj.position.y;
+                let dy = targetY - currentY;
+                
+                if (Math.abs(dy) > 0.05) {
+                    let delta = dy * 0.03; 
+                    if (Math.abs(delta) < 0.02) delta = Math.sign(dy) * 0.02; 
+                    elevatorObj.position.y += delta;
+                    // 注意：上帝视角下，摄像机高度不再强行跟随电梯一起运动
+                } else {
+                    elevatorObj.position.y = targetY;
+                    currentElevatorFloor = targetElevatorFloor;
+                    isElevatorMoving = false;
+                }
+            }
+
+            // 4. 更新机关动画
+            interactiveDoors.forEach(door => {
+                door.rotation.y = THREE.MathUtils.lerp(door.rotation.y, door.userData.targetRotationY, 0.1);
+            });
+            interactiveShutters.forEach(shutter => {
+                shutter.position.z = THREE.MathUtils.lerp(shutter.position.z, shutter.userData.targetPosZ, 0.1);
+            });
+
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
